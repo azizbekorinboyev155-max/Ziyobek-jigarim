@@ -579,6 +579,12 @@ async def broadcast_content_to_all(content, extra_caption=None, progress_chat_id
                     text = f"{text}\n\n{extra_caption}"
                 text += ads_block
                 await bot.send_message(uid, text, reply_markup=kb)
+            elif content['type'] == 'photo':
+                caption = content.get('caption') or ''
+                if extra_caption:
+                    caption = f"{caption}\n\n{extra_caption}" if caption else extra_caption
+                caption += ads_block
+                await bot.send_photo(uid, content['file_id'], caption=caption or None, reply_markup=kb)
             elif content['type'] == 'video':
                 caption = content.get('caption') or ''
                 if extra_caption:
@@ -1229,7 +1235,9 @@ async def receive_broadcast_content(message: types.Message, state: FSMContext):
         return
 
     content = None
-    if message.video:
+    if message.photo:
+        content = {'type': 'photo', 'file_id': message.photo[-1].file_id, 'caption': message.caption or ''}
+    elif message.video:
         content = {'type': 'video', 'file_id': message.video.file_id, 'caption': message.caption or ''}
     elif message.voice:
         content = {'type': 'voice', 'file_id': message.voice.file_id, 'caption': message.caption or ''}
