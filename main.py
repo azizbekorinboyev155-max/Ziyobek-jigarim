@@ -3,6 +3,7 @@ import sqlite3
 import asyncio
 import time
 import os
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
@@ -46,6 +47,8 @@ BROADCAST_BUTTON_TEXT = "✉️ Xabar qoldirish"
 STATS_BUTTON_TEXT = "📊 Statistika"
 MEMBERS_BUTTON_TEXT = "👥 Azolar"
 ACTIVE_SUBS_BUTTON_TEXT = "📡 Faol obunachilar"
+LINK_BUTTON_TEXT = "🔗 Havola kiritish"
+LIST_BUTTON_TEXT = "📋 Ro'yxat"
 USER_CANCEL_BUTTON_TEXT = "🚫 Bekor qilish"
 
 # Necha kun harakatsiz qolsa, foydalanuvchi "passiv" deb belgilanadi
@@ -65,10 +68,13 @@ class AdminStates(StatesGroup):
     waiting_broadcast_confirm = State()    # "izoh qo'shasizmi?" javobini kutmoqda
     waiting_broadcast_izoh = State()       # izoh matnini kutmoqda
     waiting_slot_video = State()          # bo'sh qolgan raqamga video kutmoqda
+    waiting_ad_link = State()             # reklama havolasini kutmoqda
+    waiting_ad_duration = State()         # reklama muddatini kutmoqda
 
 
 # ============ BAZA ============
-conn = sqlite3.connect('movies.db', check_same_thread=False)
+DB_PATH = os.getenv('DB_PATH', 'movies.db')
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('PRAGMA journal_mode=WAL')
 cursor.execute('PRAGMA synchronous=NORMAL')
@@ -156,10 +162,23 @@ CREATE TABLE IF NOT EXISTS history (
 ''')
 conn.commit()
 
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS ads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT,
+    duration_text TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT,
+    is_active INTEGER DEFAULT 1
+)
+''')
+conn.commit()
+
 # Qidiruvni tezlashtiruvchi indekslar
 cursor.execute('CREATE INDEX IF NOT EXISTS idx_movies_code ON movies(code)')
 cursor.execute('CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id, watched_at)')
 cursor.execute('CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_ads_active ON ads(is_active)')
 conn.commit()
 
 
@@ -294,6 +313,13 @@ def bot_link_button():
     ])
 
 
+def bot_link_and_ads_keyboard():
+    """'Xabar qoldirish' orqali yuborilgan xabarlar ostiga botga o'tish tugmasi bilan
+    birga hozirda faol bo'lgan barcha reklama havolalarini ham qo'shadi."""
+    rows = [[InlineKeyboardButton(text="🤖 Botga o'tish", url=f"https://t.me/{BOT_USERNAME}")]] + ads_keyboard_rows()
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def movie_keyboard(movie_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐ Saqlash", callback_data=f"save:{movie_id}")],
@@ -371,6 +397,90 @@ def admin_list_text_and_keyboard():
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def parse_duration_to_seconds(text):
+    """'2 kun', '12 soat', '3 kun 5 soat', '30 daqiqa' kabi matnlarni soniyaga aylantiradi.
+    Hech narsa tushunilmasa None qaytaradi."""
+    text = text.lower()
+    total_seconds = 0
+    found = False
+
+    day_match = re.search(r'(\d+)\s*kun', text)
+    if day_match:
+        total_seconds += int(day_match.group(1)) * 86400
+        found = True
+
+    hour_match = re.search(r'(\d+)\s*soat', text)
+    if hour_match:
+        total_seconds += int(hour_match.group(1)) * 3600
+        found = True
+
+    minute_match = re.search(r'(\d+)\s*(daqiqa|minut)', text)
+    if minute_match:
+        total_seconds += int(minute_match.group(1)) * 60
+        found = True
+
+    if not found:
+        return None
+    return total_seconds
+
+
+def format_remaining(expires_at_str):
+    """Havola tugashiga qancha vaqt qolganini o'qiladigan matn qilib qaytaradi."""
+    try:
+        expires_ts = time.mktime(time.strptime(expires_at_str, '%Y-%m-%d %H:%M:%S'))
+    except Exception:
+        return "noma'lum"
+    remaining = expires_ts - time.time()
+    if remaining <= 0:
+        return "muddati tugagan"
+    days = int(remaining // 86400)
+    hours = int((remaining % 86400) // 3600)
+    minutes = int((remaining % 3600) // 60)
+    parts = []
+    if days:
+        parts.append(f"{days} kun")
+    if hours:
+        parts.append(f"{hours} soat")
+    if not days and minutes:
+        parts.append(f"{minutes} daqiqa")
+    return " ".join(parts) if parts else "1 daqiqadan kam"
+
+
+def get_active_ads():
+    cursor.execute('SELECT id, url FROM ads WHERE is_active = 1 ORDER BY id ASC')
+    return cursor.fetchall()
+
+
+def ads_keyboard_rows():
+    """Faol reklama havolalarini tugma qatorlariga aylantiradi - admin yuborgan
+    har qanday xabar ostiga qo'shish uchun."""
+    return [[InlineKeyboardButton(text="📢 Reklama", url=url)] for _, url in get_active_ads()]
+
+
+def ads_text_block():
+    """Faol reklama havolalarini matn ko'rinishida qaytaradi - shu bilan
+    xabar forward qilinganda ham havola yo'qolmaydi."""
+    ads = get_active_ads()
+    if not ads:
+        return ""
+    lines = "\n".join(url for _, url in ads)
+    return f"\n\n{lines}"
+
+
+def build_ads_list_text_and_keyboard():
+    cursor.execute('SELECT id, url, expires_at FROM ads WHERE is_active = 1 ORDER BY id DESC')
+    ads = cursor.fetchall()
+    if not ads:
+        return "📋 Hozircha faol havolalar yo'q.", None
+    text = "📋 Faol havolalar ro'yxati:\n\n"
+    rows = []
+    for idx, (ad_id, url, expires_at) in enumerate(ads, start=1):
+        remaining = format_remaining(expires_at)
+        text += f"{idx}. {url}\n⏳ Qoldi: {remaining}\n\n"
+        rows.append([InlineKeyboardButton(text=f"🗑 {idx}-havolani o'chirish", callback_data=f"ad_del:{ad_id}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -394,6 +504,7 @@ def admin_reply_keyboard():
             [KeyboardButton(text=ADMIN_BUTTON_TEXT), KeyboardButton(text=BROADCAST_BUTTON_TEXT)],
             [KeyboardButton(text=STATS_BUTTON_TEXT)],
             [KeyboardButton(text=MEMBERS_BUTTON_TEXT), KeyboardButton(text=ACTIVE_SUBS_BUTTON_TEXT)],
+            [KeyboardButton(text=LINK_BUTTON_TEXT), KeyboardButton(text=LIST_BUTTON_TEXT)],
             [KeyboardButton(text=USER_CANCEL_BUTTON_TEXT)]
         ],
         resize_keyboard=True,
@@ -429,7 +540,8 @@ async def get_all_user_ids():
 async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, progress_message_id=None):
     """Premyerani (video + tayyor caption) barchaga yuboradi."""
     sent, failed = 0, 0
-    kb = InlineKeyboardMarkup(inline_keyboard=[channel_button_row()])
+    caption_text = caption_text + ads_text_block()
+    kb = InlineKeyboardMarkup(inline_keyboard=[channel_button_row()] + ads_keyboard_rows())
     user_ids = await get_all_user_ids()
     total = len(user_ids)
     for uid in user_ids:
@@ -457,23 +569,28 @@ async def broadcast_content_to_all(content, extra_caption=None, progress_chat_id
     sent, failed = 0, 0
     user_ids = await get_all_user_ids()
     total = len(user_ids)
+    ads_block = ads_text_block()
+    kb = bot_link_and_ads_keyboard()
     for uid in user_ids:
         try:
             if content['type'] == 'text':
-                text = content['text']
+                text = content['text'] 
                 if extra_caption:
                     text = f"{text}\n\n{extra_caption}"
-                await bot.send_message(uid, text, reply_markup=bot_link_button())
+                text += ads_block
+                await bot.send_message(uid, text, reply_markup=kb)
             elif content['type'] == 'video':
                 caption = content.get('caption') or ''
                 if extra_caption:
                     caption = f"{caption}\n\n{extra_caption}" if caption else extra_caption
-                await bot.send_video(uid, content['file_id'], caption=caption or None, reply_markup=bot_link_button())
+                caption += ads_block
+                await bot.send_video(uid, content['file_id'], caption=caption or None, reply_markup=kb)
             elif content['type'] == 'voice':
                 caption = content.get('caption') or ''
                 if extra_caption:
                     caption = f"{caption}\n\n{extra_caption}" if caption else extra_caption
-                await bot.send_voice(uid, content['file_id'], caption=caption or None, reply_markup=bot_link_button())
+                caption += ads_block
+                await bot.send_voice(uid, content['file_id'], caption=caption or None, reply_markup=kb)
             sent += 1
         except Exception as e:
             failed += 1
@@ -975,6 +1092,64 @@ async def broadcast_button_handler(message: types.Message, state: FSMContext):
     )
 
 
+@dp.message(F.text == LINK_BUTTON_TEXT)
+async def link_button_handler(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.set_state(AdminStates.waiting_ad_link)
+    await message.answer("🔗 Havola kiriting:", reply_markup=cancel_keyboard())
+
+
+@dp.message(F.text == LIST_BUTTON_TEXT)
+async def list_button_handler(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text, kb = build_ads_list_text_and_keyboard()
+    await message.answer(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("ad_del:"))
+async def ad_del_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    ad_id = int(callback.data.split(":")[1])
+    cursor.execute('SELECT url FROM ads WHERE id = ?', (ad_id,))
+    row = cursor.fetchone()
+    if not row:
+        await callback.answer("Havola topilmadi.", show_alert=True)
+        return
+    url = row[0]
+    await callback.message.edit_text(
+        f"⚠️ Ushbu havolani rostdan ham o'chirmoqchimisiz?\n\n🔗 {url}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data=f"ad_del_yes:{ad_id}"),
+            InlineKeyboardButton(text="❌ Yo'q", callback_data="ad_del_no")
+        ]])
+    )
+
+
+@dp.callback_query(F.data.startswith("ad_del_yes:"))
+async def ad_del_yes_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    ad_id = int(callback.data.split(":")[1])
+    cursor.execute('UPDATE ads SET is_active = 0 WHERE id = ?', (ad_id,))
+    conn.commit()
+    text, kb = build_ads_list_text_and_keyboard()
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer("🗑 O'chirildi")
+
+
+@dp.callback_query(F.data == "ad_del_no")
+async def ad_del_no_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    text, kb = build_ads_list_text_and_keyboard()
+    await callback.message.edit_text(text, reply_markup=kb)
+
+
 # ---------- Har bir foydalanuvchi uchun /cancel (bekor qilish) ----------
 # MUHIM: bu handlerlar pastdagi barcha FSM (holat) handlerlaridan OLDIN turishi shart,
 # aks holda /cancel matni o'sha holat handleri tomonidan "yutib yuborilishi" mumkin.
@@ -1115,6 +1290,60 @@ async def receive_broadcast_izoh(message: types.Message, state: FSMContext):
         progress_message_id=status_msg.message_id
     )
     await message.answer(f"✅ Xabar {sent} foydalanuvchiga yuborildi.\n⚠️ {failed} ta xatolik.")
+
+
+# ---------- ADMIN: Reklama havolasi qo'shish oqimi ----------
+
+@dp.message(F.text, AdminStates.waiting_ad_link)
+async def receive_ad_link(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    url = message.text.strip()
+    await state.update_data(ad_url=url)
+    await state.set_state(AdminStates.waiting_ad_duration)
+    await message.answer(
+        "⏳ Qancha muddat amalda tursin?\n\n"
+        "Masalan: <code>2 kun</code>, <code>12 soat</code>, <code>1 kun 6 soat</code>, <code>30 daqiqa</code>",
+        parse_mode="HTML",
+        reply_markup=cancel_keyboard()
+    )
+
+
+@dp.message(F.text, AdminStates.waiting_ad_duration)
+async def receive_ad_duration(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    url = data.get('ad_url')
+    if not url:
+        await state.clear()
+        await message.answer("❌ Xatolik: havola topilmadi. Qaytadan 🔗 Havola kiritish tugmasini bosing.")
+        return
+
+    seconds = parse_duration_to_seconds(message.text)
+    if seconds is None:
+        await message.answer(
+            "⚠️ Muddatni tushunmadim. Masalan: <code>2 kun</code>, <code>12 soat</code>, <code>1 kun 6 soat</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    await state.clear()
+    expires_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + seconds))
+
+    cursor.execute(
+        'INSERT INTO ads (url, duration_text, expires_at, is_active) VALUES (?, ?, ?, 1)',
+        (url, message.text.strip(), expires_at)
+    )
+    conn.commit()
+
+    await message.answer(
+        f"✅ Havola qo'shildi!\n\n"
+        f"🔗 {url}\n"
+        f"⏳ Muddat: {message.text.strip()}\n"
+        f"📅 Tugash vaqti: {expires_at}\n\n"
+        f"Bu havola shu muddat davomida yuboradigan barcha xabarlaringiz ostiga avtomatik qo'shiladi."
+    )
 
 
 # ---------- Kino qo'shish (admin) ----------
@@ -1313,8 +1542,40 @@ async def check_inactive_users():
         await asyncio.sleep(3600)
 
 
+async def check_expired_ads():
+    """Har daqiqada ishga tushadi: muddati tugagan reklama havolalarini
+    avtomatik faolsizlantiradi va admin'ga xabar beradi."""
+    while True:
+        try:
+            now_str = time.strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute(
+                "SELECT id, url FROM ads WHERE is_active = 1 AND expires_at <= ?",
+                (now_str,)
+            )
+            expired = cursor.fetchall()
+            for ad_id, url in expired:
+                cursor.execute("UPDATE ads SET is_active = 0 WHERE id = ?", (ad_id,))
+            if expired:
+                conn.commit()
+                for ad_id, url in expired:
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"⏰ <b>Havola muddati tugadi</b>\n\n"
+                            f"🔗 {url}\n\n"
+                            f"Belgilangan muddati tugagani sababli ro'yxatdan va amaldan avtomatik olib tashlandi.",
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logging.warning(f"Admin'ga havola tugashi haqida xabar berishda xato: {e}")
+        except Exception as e:
+            logging.warning(f"Havolalar muddatini tekshirishda xato: {e}")
+        await asyncio.sleep(60)
+
+
 async def main():
     asyncio.create_task(check_inactive_users())
+    asyncio.create_task(check_expired_ads())
     await dp.start_polling(bot)
 
 
