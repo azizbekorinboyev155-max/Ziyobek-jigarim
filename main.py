@@ -810,10 +810,6 @@ async def start(message: types.Message, command: CommandObject):
         "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling",
         reply_markup=build_subscribe_keyboard()
     )
-    await message.answer(
-        "👇 Pastdagi doimiy tugma orqali istalgan vaqt jarayonni bekor qilishingiz mumkin.",
-        reply_markup=user_reply_keyboard()
-    )
 
 
 @dp.callback_query(F.data == "check_sub")
