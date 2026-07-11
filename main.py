@@ -300,10 +300,10 @@ def movie_caption(movie_id, name):
 
 
 def channel_button_row():
-    """Har qanday videoning tagida turadigan yagona 'Kodli kinolar' kanal tugmasi.
+    """Har qanday videoning tagida turadigan yagona kanal tugmasi.
     Inline tugma bo'lgani uchun, video forward qilinganda ham Telegram uni saqlab qoladi."""
     return [
-        InlineKeyboardButton(text="🎬 Kodli kinolar", url=f"https://t.me/{CHANNEL_ID2[1:]}")
+        InlineKeyboardButton(text="🎬 Kinolarni qidirish", url=f"https://t.me/{CHANNEL_ID2[1:]}")
     ]
 
 
@@ -494,13 +494,28 @@ def get_active_ads():
 
 def ads_keyboard_rows():
     """Faol reklama havolalarini tugma qatorlariga aylantiradi - admin yuborgan
-    har qanday xabar ostiga qo'shish uchun. Noto'g'ri formatdagi havolalar
-    (agar qandaydir sabab bilan bazaga kirib qolgan bo'lsa) o'tkazib yuboriladi -
-    shunda ular boshqa funksiyalarni (Premyera, Xabar qoldirish) buzmaydi."""
-    return [
-        [InlineKeyboardButton(text="📢 Reklama", url=url)]
-        for _, url in get_active_ads() if looks_like_valid_url(url)
-    ]
+    har qanday xabar ostiga qo'shish uchun."""
+    return [[InlineKeyboardButton(text="Obuna bo'lish ➕", url=url)] for _, url in get_active_ads()]
+
+
+def get_min_remaining_seconds():
+    """Barcha faol havolalar orasida eng tez tugaydiganigacha necha soniya qolganini qaytaradi.
+    Jonli hisoblagich qanchalik tez-tez yangilanishi kerakligini shu belgilaydi."""
+    cursor.execute('SELECT expires_at FROM ads WHERE is_active = 1')
+    rows = cursor.fetchall()
+    if not rows:
+        return None
+    now = time.time()
+    remainings = []
+    for (expires_at,) in rows:
+        try:
+            expires_ts = time.mktime(time.strptime(expires_at, '%Y-%m-%d %H:%M:%S'))
+            remainings.append(expires_ts - now)
+        except Exception:
+            continue
+    if not remainings:
+        return None
+    return min(remainings)
 
 
 def ads_text_block():
@@ -578,6 +593,48 @@ async def open_admin_panel(chat_id):
     await bot.send_message(chat_id, text, reply_markup=kb)
 
 
+LIVE_LIST_TASKS = {}  # admin_id -> asyncio.Task (har bir adminda faqat bitta jonli hisoblagich)
+
+
+async def live_list_updater(chat_id, message_id):
+    """'Ro'yxat' xabarini muddat tugaguncha avtomatik yangilab turadi.
+    Qolgan vaqtga qarab tezligini o'zi moslaydi - soniyalar bilan sanaladigan
+    havolalar uchun ham (masalan '45 soniya') jonli ko'rinadi."""
+    while True:
+        min_remaining = get_min_remaining_seconds()
+        if min_remaining is None:
+            try:
+                await bot.edit_message_text(
+                    "📋 Hozircha faol havolalar yo'q.",
+                    chat_id=chat_id, message_id=message_id
+                )
+            except Exception:
+                pass
+            break
+
+        if min_remaining > 86400:
+            interval = 300
+        elif min_remaining > 3600:
+            interval = 30
+        elif min_remaining > 60:
+            interval = 5
+        else:
+            interval = 2
+
+        await asyncio.sleep(interval)
+
+        text, kb = build_ads_list_text_and_keyboard()
+        try:
+            if text is None or kb is None:
+                await bot.edit_message_text("📋 Hozircha faol havolalar yo'q.", chat_id=chat_id, message_id=message_id)
+                break
+            await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb)
+        except Exception as e:
+            if "message is not modified" not in str(e).lower():
+                logging.warning(f"Jonli hisoblagichni yangilashda xato: {e}")
+                break
+
+
 async def get_all_user_ids():
     cursor.execute('SELECT user_id FROM users')
     return [r[0] for r in cursor.fetchall()]
@@ -586,7 +643,6 @@ async def get_all_user_ids():
 async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, progress_message_id=None):
     """Premyerani (video + tayyor caption) barchaga yuboradi."""
     sent, failed = 0, 0
-    caption_text = caption_text + ads_text_block()
     kb = InlineKeyboardMarkup(inline_keyboard=[channel_button_row()] + ads_keyboard_rows())
     user_ids = await get_all_user_ids()
     total = len(user_ids)
@@ -615,33 +671,28 @@ async def broadcast_content_to_all(content, extra_caption=None, progress_chat_id
     sent, failed = 0, 0
     user_ids = await get_all_user_ids()
     total = len(user_ids)
-    ads_block = ads_text_block()
     kb = bot_link_and_ads_keyboard()
     for uid in user_ids:
         try:
             if content['type'] == 'text':
-                text = content['text'] 
+                text = content['text']
                 if extra_caption:
                     text = f"{text}\n\n{extra_caption}"
-                text += ads_block
                 await bot.send_message(uid, text, reply_markup=kb)
             elif content['type'] == 'photo':
                 caption = content.get('caption') or ''
                 if extra_caption:
                     caption = f"{caption}\n\n{extra_caption}" if caption else extra_caption
-                caption += ads_block
                 await bot.send_photo(uid, content['file_id'], caption=caption or None, reply_markup=kb)
             elif content['type'] == 'video':
                 caption = content.get('caption') or ''
                 if extra_caption:
                     caption = f"{caption}\n\n{extra_caption}" if caption else extra_caption
-                caption += ads_block
                 await bot.send_video(uid, content['file_id'], caption=caption or None, reply_markup=kb)
             elif content['type'] == 'voice':
                 caption = content.get('caption') or ''
                 if extra_caption:
                     caption = f"{caption}\n\n{extra_caption}" if caption else extra_caption
-                caption += ads_block
                 await bot.send_voice(uid, content['file_id'], caption=caption or None, reply_markup=kb)
             sent += 1
         except Exception as e:
@@ -1156,8 +1207,17 @@ async def link_button_handler(message: types.Message, state: FSMContext):
 async def list_button_handler(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
+
+    old_task = LIVE_LIST_TASKS.pop(message.from_user.id, None)
+    if old_task:
+        old_task.cancel()
+
     text, kb = build_ads_list_text_and_keyboard()
-    await message.answer(text, reply_markup=kb)
+    sent = await message.answer(text, reply_markup=kb)
+
+    if text != "📋 Hozircha faol havolalar yo'q.":
+        task = asyncio.create_task(live_list_updater(sent.chat.id, sent.message_id))
+        LIVE_LIST_TASKS[message.from_user.id] = task
 
 
 @dp.callback_query(F.data.startswith("ad_del:"))
@@ -1189,8 +1249,18 @@ async def ad_del_yes_callback(callback: types.CallbackQuery):
     ad_id = int(callback.data.split(":")[1])
     cursor.execute('UPDATE ads SET is_active = 0 WHERE id = ?', (ad_id,))
     conn.commit()
+
+    old_task = LIVE_LIST_TASKS.pop(callback.from_user.id, None)
+    if old_task:
+        old_task.cancel()
+
     text, kb = build_ads_list_text_and_keyboard()
     await callback.message.edit_text(text, reply_markup=kb)
+
+    if text != "📋 Hozircha faol havolalar yo'q." and kb is not None:
+        task = asyncio.create_task(live_list_updater(callback.message.chat.id, callback.message.message_id))
+        LIVE_LIST_TASKS[callback.from_user.id] = task
+
     await callback.answer("🗑 O'chirildi")
 
 
