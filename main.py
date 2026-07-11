@@ -20,7 +20,7 @@ _ADMIN_ID_RAW = os.getenv('ADMIN_ID')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Ruhshunos_seriali7')
 CHANNEL_ID2 = os.getenv('CHANNEL_ID2', '@org_Kino_finder')
 CHANNELS = [CHANNEL_ID, CHANNEL_ID2]
-BOT_USERNAME = os.getenv('BOT_USERNAME', 'KinoFinderUZZBOT')  # masalan: MyMovieBot (@ belgisiz)
+BOT_USERNAME = os.getenv('BOT_USERNAME', 'KinoFinderUzzBOT')  # masalan: MyMovieBot (@ belgisiz)
 
 if not API_TOKEN:
     raise RuntimeError(
