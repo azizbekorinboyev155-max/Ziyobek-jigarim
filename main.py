@@ -174,11 +174,38 @@ CREATE TABLE IF NOT EXISTS ads (
 ''')
 conn.commit()
 
+try:
+    cursor.execute("ALTER TABLE ads ADD COLUMN channel_username TEXT DEFAULT ''")
+except sqlite3.OperationalError:
+    pass  # ustun allaqachon mavjud
+conn.commit()
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS premieres (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    caption TEXT,
+    file_id TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS premiere_sends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    premiere_id INTEGER,
+    user_id INTEGER,
+    message_id INTEGER
+)
+''')
+conn.commit()
+
 # Qidiruvni tezlashtiruvchi indekslar
 cursor.execute('CREATE INDEX IF NOT EXISTS idx_movies_code ON movies(code)')
 cursor.execute('CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id, watched_at)')
 cursor.execute('CREATE INDEX IF NOT EXISTS idx_watchlist_user ON watchlist(user_id)')
 cursor.execute('CREATE INDEX IF NOT EXISTS idx_ads_active ON ads(is_active)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_premiere_sends_premiere ON premiere_sends(premiere_id)')
 conn.commit()
 
 
@@ -221,13 +248,15 @@ SUBSCRIPTION_CACHE_TTL = 300  # 5 daqiqa - shu muddatda qayta so'ramaydi, bot te
 
 
 async def is_subscribed(user_id):
-    """Foydalanuvchi BARCHA kanallarga obuna bo'lgandagina True qaytaradi.
-    Tezlik uchun: 1) ikkala kanal BIR VAQTDA tekshiriladi, 2) natija 5 daqiqaga keshlanadi."""
+    """Foydalanuvchi BARCHA majburiy kanallarga (doimiy 2 ta + admin qo'shgan faol havola-kanallar)
+    obuna bo'lgandagina True qaytaradi.
+    Tezlik uchun: 1) barcha kanallar BIR VAQTDA tekshiriladi, 2) natija 5 daqiqaga keshlanadi."""
     cached = SUBSCRIPTION_CACHE.get(user_id)
     if cached and (time.time() - cached[1] < SUBSCRIPTION_CACHE_TTL):
         return cached[0]
 
-    results = await asyncio.gather(*[is_subscribed_to(user_id, ch) for ch in CHANNELS])
+    all_channels = CHANNELS + get_active_ad_channels()
+    results = await asyncio.gather(*[is_subscribed_to(user_id, ch) for ch in all_channels])
     result = all(results)
     SUBSCRIPTION_CACHE[user_id] = (result, time.time())
     return result
@@ -492,6 +521,23 @@ def get_active_ads():
     return cursor.fetchall()
 
 
+def extract_tme_channel(url):
+    """Agar havola https://t.me/kanal_nomi ko'rinishida bo'lsa, '@kanal_nomi' qaytaradi.
+    Aks holda (masalan Instagram havolasi yoki shaxsiy taklif havolasi) None qaytaradi -
+    bunday havolalar uchun obuna MAJBURIY TALAB sifatida tekshirilmaydi, faqat tugma sifatida ko'rsatiladi."""
+    match = re.match(r'^https?://t\.me/([A-Za-z0-9_]{5,32})/?$', url.strip(), re.IGNORECASE)
+    if match:
+        return f"@{match.group(1)}"
+    return None
+
+
+def get_active_ad_channels():
+    """Hozirda faol bo'lgan, MAJBURIY OBUNA sifatida tekshirilishi mumkin bo'lgan
+    (ya'ni https://t.me/kanal_nomi ko'rinishidagi) havolalarning kanal nomlarini qaytaradi."""
+    cursor.execute("SELECT channel_username FROM ads WHERE is_active = 1 AND channel_username != ''")
+    return [r[0] for r in cursor.fetchall()]
+
+
 def ads_keyboard_rows():
     """Faol reklama havolalarini tugma qatorlariga aylantiradi - admin yuborgan
     har qanday xabar ostiga qo'shish uchun."""
@@ -556,6 +602,20 @@ def main_menu_keyboard():
             InlineKeyboardButton(text="🕐 Tarix", callback_data="history")
         ]
     ])
+
+
+def build_subscribe_keyboard():
+    """/start bosilganda chiqadigan obuna tugmalari. Doimiy 2 ta kanal + admin
+    'Havola kiritish' orqali qo'shgan, HALI MUDDATI TUGAMAGAN barcha havolalar.
+    Havola muddati tugashi bilan bu yerdan AVTOMATIK yo'qoladi."""
+    rows = [
+        [InlineKeyboardButton(text="Obuna bo'lish ➕", url=f"https://t.me/{CHANNEL_ID[1:]}")],
+        [InlineKeyboardButton(text="Obuna bo'lish ➕", url=f"https://t.me/{CHANNEL_ID2[1:]}")],
+    ]
+    for _, url in get_active_ads():
+        rows.append([InlineKeyboardButton(text="Obuna bo'lish ➕", url=url)])
+    rows.append([InlineKeyboardButton(text="Tekshirish🔁", callback_data="check_sub")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_reply_keyboard():
@@ -640,16 +700,25 @@ async def get_all_user_ids():
     return [r[0] for r in cursor.fetchall()]
 
 
-async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, progress_message_id=None):
-    """Premyerani (video + tayyor caption) barchaga yuboradi."""
+async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, progress_message_id=None, premiere_id=None):
+    """Premyerani (video + tayyor caption) barchaga yuboradi.
+    Agar premiere_id berilsa, har bir yuborilgan xabarning chat_id/message_id manzili
+    premiere_sends jadvaliga yoziladi - shu orqali keyinchalik premyerani HAMMA
+    foydalanuvchidan o'chirish (delete_message) imkoniyati paydo bo'ladi."""
     sent, failed = 0, 0
     kb = InlineKeyboardMarkup(inline_keyboard=[channel_button_row()] + ads_keyboard_rows())
     user_ids = await get_all_user_ids()
     total = len(user_ids)
     for uid in user_ids:
         try:
-            await bot.send_video(uid, file_id, caption=caption_text, reply_markup=kb)
+            msg = await bot.send_video(uid, file_id, caption=caption_text, reply_markup=kb)
             sent += 1
+            if premiere_id is not None:
+                cursor.execute(
+                    'INSERT INTO premiere_sends (premiere_id, user_id, message_id) VALUES (?, ?, ?)',
+                    (premiere_id, uid, msg.message_id)
+                )
+                conn.commit()
         except Exception as e:
             failed += 1
             logging.warning(f"Premyera yuborishda xato ({uid}): {e}")
@@ -739,11 +808,7 @@ async def start(message: types.Message, command: CommandObject):
 
     await message.answer(
         "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Obuna bo'lish ➕", url=f"https://t.me/{CHANNEL_ID[1:]}")],
-            [InlineKeyboardButton(text="Obuna bo'lish ➕", url=f"https://t.me/{CHANNEL_ID2[1:]}")],
-            [InlineKeyboardButton(text="Tekshirish🔁", callback_data="check_sub")]
-        ])
+        reply_markup=build_subscribe_keyboard()
     )
     await message.answer(
         "👇 Pastdagi doimiy tugma orqali istalgan vaqt jarayonni bekor qilishingiz mumkin.",
@@ -1060,15 +1125,112 @@ async def admin_button_handler(message: types.Message, state: FSMContext):
     await open_admin_panel(message.chat.id)
 
 
+def premiere_menu_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Premyera yuklash", callback_data="premiere_upload")],
+        [InlineKeyboardButton(text="🗑 Premyeralarni tahrirlash", callback_data="premiere_edit_list")]
+    ])
+
+
 @dp.message(F.text == PREMIERE_BUTTON_TEXT)
 async def premiere_button_handler(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
+    await state.clear()
+    await message.answer("🎬 Nima qilmoqchisiz?", reply_markup=premiere_menu_keyboard())
+
+
+@dp.callback_query(F.data == "premiere_menu")
+async def premiere_menu_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+    await callback.message.edit_text("🎬 Nima qilmoqchisiz?", reply_markup=premiere_menu_keyboard())
+
+
+@dp.callback_query(F.data == "premiere_upload")
+async def premiere_upload_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
     await state.set_state(AdminStates.waiting_premiere_video)
-    await message.answer(
+    await callback.message.edit_text(
         "🎬 Premyera uchun qisqa kino videosini shu yerga yuboring.",
-        reply_markup=cancel_keyboard()
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data="premiere_menu")]
+        ])
     )
+
+
+def build_premiere_list_keyboard():
+    cursor.execute('SELECT id, name FROM premieres ORDER BY id DESC')
+    rows = cursor.fetchall()
+    if not rows:
+        return (
+            "🗑 Hozircha yuklangan premyeralar yo'q.",
+            InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Orqaga", callback_data="premiere_menu")]])
+        )
+    text = "🗑 Premyeralar ro'yxati — o'chirish uchun tanlang:\n\n"
+    kb_rows = []
+    for idx, (pid, name) in enumerate(rows, start=1):
+        text += f"{idx}. {name}\n"
+        kb_rows.append([InlineKeyboardButton(text=f"🗑 {idx}. {name}", callback_data=f"premiere_del:{pid}")])
+    kb_rows.append([InlineKeyboardButton(text="⬅️ Orqaga", callback_data="premiere_menu")])
+    return text, InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@dp.callback_query(F.data == "premiere_edit_list")
+async def premiere_edit_list_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    text, kb = build_premiere_list_keyboard()
+    await callback.message.edit_text(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("premiere_del:"))
+async def premiere_del_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    premiere_id = int(callback.data.split(":")[1])
+    cursor.execute('SELECT name FROM premieres WHERE id = ?', (premiere_id,))
+    row = cursor.fetchone()
+    if not row:
+        await callback.answer("Premyera topilmadi.", show_alert=True)
+        return
+    name = row[0]
+    await callback.message.edit_text(
+        f"⚠️ '{name}' premyerasini barcha foydalanuvchilardan o'chirmoqchimisiz?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data=f"premiere_del_yes:{premiere_id}"),
+            InlineKeyboardButton(text="❌ Yo'q", callback_data="premiere_edit_list")
+        ]])
+    )
+
+
+@dp.callback_query(F.data.startswith("premiere_del_yes:"))
+async def premiere_del_yes_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    premiere_id = int(callback.data.split(":")[1])
+
+    cursor.execute('SELECT user_id, message_id FROM premiere_sends WHERE premiere_id = ?', (premiere_id,))
+    sends = cursor.fetchall()
+
+    deleted, failed = 0, 0
+    for uid, mid in sends:
+        try:
+            await bot.delete_message(chat_id=uid, message_id=mid)
+            deleted += 1
+        except Exception as e:
+            failed += 1
+            logging.warning(f"Premyera xabarini o'chirishda xato ({uid}): {e}")
+
+    cursor.execute('DELETE FROM premiere_sends WHERE premiere_id = ?', (premiere_id,))
+    cursor.execute('DELETE FROM premieres WHERE id = ?', (premiere_id,))
+    conn.commit()
+
+    await callback.answer(f"✅ {deleted} ta xabardan o'chirildi, {failed} ta muvaffaqiyatsiz.")
+    text, kb = build_premiere_list_keyboard()
+    await callback.message.edit_text(text, reply_markup=kb)
 
 
 @dp.message(F.text == STATS_BUTTON_TEXT)
@@ -1249,6 +1411,7 @@ async def ad_del_yes_callback(callback: types.CallbackQuery):
     ad_id = int(callback.data.split(":")[1])
     cursor.execute('UPDATE ads SET is_active = 0 WHERE id = ?', (ad_id,))
     conn.commit()
+    SUBSCRIPTION_CACHE.clear()
 
     old_task = LIVE_LIST_TASKS.pop(callback.from_user.id, None)
     if old_task:
@@ -1330,16 +1493,25 @@ async def receive_premiere_caption(message: types.Message, state: FSMContext):
     full_caption += f"\n\n📢 Kanal: https://t.me/{CHANNEL_ID[1:]}"
     full_caption += f"\n📢 Kanal: https://t.me/{CHANNEL_ID2[1:]}"
 
+    cursor.execute(
+        'INSERT INTO premieres (name, caption, file_id) VALUES (?, ?, ?)',
+        (name, full_caption, file_id)
+    )
+    conn.commit()
+    premiere_id = cursor.lastrowid
+
     status_msg = await message.answer("📤 Premyera barchaga yuborilmoqda, biroz kuting...")
     sent, failed = await broadcast_video_to_all(
         file_id, full_caption,
         progress_chat_id=status_msg.chat.id,
-        progress_message_id=status_msg.message_id
+        progress_message_id=status_msg.message_id,
+        premiere_id=premiere_id
     )
 
     await message.answer(
         f"✅ Premyera barcha foydalanuvchilarga yuborildi.\n"
-        f"{sent} foydalanuvchiga yuborildi.\n⚠️ {failed} ta xatolik."
+        f"{sent} foydalanuvchiga yuborildi.\n⚠️ {failed} ta xatolik.\n\n"
+        f"ℹ️ Bu premyerani keyin ham 🎬 Premyera → 🗑 Premyeralarni tahrirlash orqali o'chirishingiz mumkin."
     )
 
 
@@ -1479,19 +1651,37 @@ async def receive_ad_duration(message: types.Message, state: FSMContext):
 
     await state.clear()
     expires_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() + seconds))
+    channel_username = extract_tme_channel(url)
 
     cursor.execute(
-        'INSERT INTO ads (url, duration_text, expires_at, is_active) VALUES (?, ?, ?, 1)',
-        (url, message.text.strip(), expires_at)
+        'INSERT INTO ads (url, duration_text, expires_at, is_active, channel_username) VALUES (?, ?, ?, 1, ?)',
+        (url, message.text.strip(), expires_at, channel_username or '')
     )
     conn.commit()
+
+    if channel_username:
+        SUBSCRIPTION_CACHE.clear()  # yangi majburiy kanal qo'shildi, eski "obuna bor" keshi endi noto'g'ri bo'lishi mumkin
+        subscribe_note = (
+            f"✅ Bu Telegram kanal havolasi deb tanildi ({channel_username}).\n"
+            f"👉 /start bosgan barcha foydalanuvchilar shu kanalga ham OBUNA BO'LISHI SHART bo'ladi, "
+            f"muddat tugaguncha.\n\n"
+            f"⚠️ ESLATMA: bot shu kanalga ADMIN sifatida qo'shilgan bo'lishi shart, aks holda "
+            f"obunani tekshira olmaydi!"
+        )
+    else:
+        subscribe_note = (
+            "ℹ️ Bu Telegram kanal havolasi ko'rinishida emas (masalan https://t.me/kanal_nomi emas), "
+            "shuning uchun majburiy obuna sifatida TEKSHIRILMAYDI - faqat tugma sifatida ko'rsatiladi."
+        )
 
     await message.answer(
         f"✅ Havola qo'shildi!\n\n"
         f"🔗 {url}\n"
         f"⏳ Muddat: {message.text.strip()}\n"
         f"📅 Tugash vaqti: {expires_at}\n\n"
-        f"Bu havola shu muddat davomida yuboradigan barcha xabarlaringiz ostiga avtomatik qo'shiladi."
+        f"Bu havola shu muddat davomida yuboradigan barcha xabarlaringiz ostiga avtomatik qo'shiladi, "
+        f"HAMDA /start tugmasidan keyingi obuna ro'yxatiga ham qo'shiladi.\n\n"
+        f"{subscribe_note}"
     )
 
 
@@ -1706,6 +1896,7 @@ async def check_expired_ads():
                 cursor.execute("UPDATE ads SET is_active = 0 WHERE id = ?", (ad_id,))
             if expired:
                 conn.commit()
+                SUBSCRIPTION_CACHE.clear()  # yangi shart tufayli eskirgan "obuna bor" keshini tozalaymiz
                 for ad_id, url in expired:
                     try:
                         await bot.send_message(
