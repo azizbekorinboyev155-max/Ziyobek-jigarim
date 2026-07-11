@@ -2,3 +2,8 @@ movies.db
 __pycache__/
 *.pyc
 .env
+movies.db
+movies.db-shm
+movies.db-wal
+*.db-journal
+settings.json
