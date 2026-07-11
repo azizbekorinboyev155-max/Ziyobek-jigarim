@@ -479,6 +479,14 @@ def format_remaining(expires_at_str):
     return " ".join(parts) if parts else "0 soniya"
 
 
+def looks_like_valid_url(url):
+    """Telegram tugmasi qabul qila oladigan haqiqiy havolaga o'xshaydimi - tekshiradi.
+    Domen nomi va bo'sh joy yo'qligini talab qiladi."""
+    if " " in url or "\n" in url:
+        return False
+    return bool(re.match(r'^https?://[^\s/$.?#][^\s]*\.[^\s]+', url, re.IGNORECASE))
+
+
 def get_active_ads():
     cursor.execute('SELECT id, url FROM ads WHERE is_active = 1 ORDER BY id ASC')
     return cursor.fetchall()
@@ -486,17 +494,22 @@ def get_active_ads():
 
 def ads_keyboard_rows():
     """Faol reklama havolalarini tugma qatorlariga aylantiradi - admin yuborgan
-    har qanday xabar ostiga qo'shish uchun."""
-    return [[InlineKeyboardButton(text="📢 Reklama", url=url)] for _, url in get_active_ads()]
+    har qanday xabar ostiga qo'shish uchun. Noto'g'ri formatdagi havolalar
+    (agar qandaydir sabab bilan bazaga kirib qolgan bo'lsa) o'tkazib yuboriladi -
+    shunda ular boshqa funksiyalarni (Premyera, Xabar qoldirish) buzmaydi."""
+    return [
+        [InlineKeyboardButton(text="📢 Reklama", url=url)]
+        for _, url in get_active_ads() if looks_like_valid_url(url)
+    ]
 
 
 def ads_text_block():
     """Faol reklama havolalarini matn ko'rinishida qaytaradi - shu bilan
     xabar forward qilinganda ham havola yo'qolmaydi."""
-    ads = get_active_ads()
+    ads = [url for _, url in get_active_ads() if looks_like_valid_url(url)]
     if not ads:
         return ""
-    lines = "\n".join(url for _, url in ads)
+    lines = "\n".join(ads)
     return f"\n\n{lines}"
 
 
@@ -1343,6 +1356,16 @@ async def receive_ad_link(message: types.Message, state: FSMContext):
 
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
+
+    if not looks_like_valid_url(url):
+        await message.answer(
+            "⚠️ Bu havola noto'g'ri ko'rinishda (bo'sh joy bor yoki domen nomi yo'q).\n\n"
+            "To'g'ri misol: <code>https://t.me/kanalim</code> yoki <code>instagram.com/sahifam</code>\n\n"
+            "Qaytadan havolani yuboring:",
+            parse_mode="HTML",
+            reply_markup=cancel_keyboard()
+        )
+        return
 
     await state.update_data(ad_url=url)
     await state.set_state(AdminStates.waiting_ad_duration)
