@@ -14,12 +14,29 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ============ SOZLAMALAR ============
-API_TOKEN = os.getenv('BOT_TOKEN', '8966417467:AAGuQ-2LQ2yEHFHcus4CkfFCTUEYOgkk0oE')
-ADMIN_ID = int(os.getenv('ADMIN_ID', '7726698680'))
+API_TOKEN = os.getenv('BOT_TOKEN')
+_ADMIN_ID_RAW = os.getenv('ADMIN_ID')
 CHANNEL_ID = os.getenv('CHANNEL_ID', '@Ruhshunos_seriali7')
 CHANNEL_ID2 = os.getenv('CHANNEL_ID2', '@org_Kino_finder')
 CHANNELS = [CHANNEL_ID, CHANNEL_ID2]
 BOT_USERNAME = os.getenv('BOT_USERNAME', 'KinoFinderUZZBOT')  # masalan: MyMovieBot (@ belgisiz)
+
+if not API_TOKEN:
+    raise RuntimeError(
+        "❌ BOT_TOKEN muhit o'zgaruvchisi topilmadi! "
+        "Railway'da Variables bo'limida BOT_TOKEN nomi to'g'ri yozilganini tekshiring."
+    )
+if not _ADMIN_ID_RAW:
+    raise RuntimeError(
+        "❌ ADMIN_ID muhit o'zgaruvchisi topilmadi! "
+        "Railway'da Variables bo'limida ADMIN_ID nomi to'g'ri yozilganini tekshiring."
+    )
+try:
+    ADMIN_ID = int(_ADMIN_ID_RAW)
+except ValueError:
+    raise RuntimeError(
+        f"❌ ADMIN_ID qiymati raqam emas: '{_ADMIN_ID_RAW}'. Faqat Telegram ID raqamini kiriting."
+    )
 REFERRAL_REWARD_THRESHOLD = 5  # nechta do'st taklif qilsa mukofot beriladi
 
 # Admin uchun doimiy pastki (Reply) tugmalar nomlari
