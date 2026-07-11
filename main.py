@@ -398,11 +398,22 @@ def admin_list_text_and_keyboard():
 
 
 def parse_duration_to_seconds(text):
-    """'2 kun', '12 soat', '3 kun 5 soat', '30 daqiqa' kabi matnlarni soniyaga aylantiradi.
+    """'2 kun', '12 soat', '1 yil', '3 oy', '45 soniya' kabi matnlarni soniyaga aylantiradi.
+    Bir nechta birlikni birga ham qabul qiladi: '1 yil 2 oy 3 kun'.
     Hech narsa tushunilmasa None qaytaradi."""
     text = text.lower()
     total_seconds = 0
     found = False
+
+    year_match = re.search(r'(\d+)\s*yil', text)
+    if year_match:
+        total_seconds += int(year_match.group(1)) * 31536000  # 365 kun
+        found = True
+
+    month_match = re.search(r'(\d+)\s*oy', text)
+    if month_match:
+        total_seconds += int(month_match.group(1)) * 2592000  # 30 kun
+        found = True
 
     day_match = re.search(r'(\d+)\s*kun', text)
     if day_match:
@@ -419,6 +430,11 @@ def parse_duration_to_seconds(text):
         total_seconds += int(minute_match.group(1)) * 60
         found = True
 
+    second_match = re.search(r'(\d+)\s*(soniya|sekund)', text)
+    if second_match:
+        total_seconds += int(second_match.group(1))
+        found = True
+
     if not found:
         return None
     return total_seconds
@@ -433,17 +449,34 @@ def format_remaining(expires_at_str):
     remaining = expires_ts - time.time()
     if remaining <= 0:
         return "muddati tugagan"
+
+    years = int(remaining // 31536000)
+    remaining -= years * 31536000
+    months = int(remaining // 2592000)
+    remaining -= months * 2592000
     days = int(remaining // 86400)
-    hours = int((remaining % 86400) // 3600)
-    minutes = int((remaining % 3600) // 60)
+    remaining -= days * 86400
+    hours = int(remaining // 3600)
+    remaining -= hours * 3600
+    minutes = int(remaining // 60)
+    remaining -= minutes * 60
+    seconds = int(remaining)
+
     parts = []
-    if days:
+    if years:
+        parts.append(f"{years} yil")
+    if months:
+        parts.append(f"{months} oy")
+    if days and not years:
         parts.append(f"{days} kun")
-    if hours:
+    if hours and not years and not months:
         parts.append(f"{hours} soat")
-    if not days and minutes:
+    if minutes and not years and not months and not days:
         parts.append(f"{minutes} daqiqa")
-    return " ".join(parts) if parts else "1 daqiqadan kam"
+    if seconds and not years and not months and not days and not hours:
+        parts.append(f"{seconds} soniya")
+
+    return " ".join(parts) if parts else "0 soniya"
 
 
 def get_active_ads():
@@ -1307,11 +1340,24 @@ async def receive_ad_link(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
     url = message.text.strip()
+
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+
     await state.update_data(ad_url=url)
     await state.set_state(AdminStates.waiting_ad_duration)
     await message.answer(
+        f"🔗 Havola shunday saqlanadi: {url}\n\n"
         "⏳ Qancha muddat amalda tursin?\n\n"
-        "Masalan: <code>2 kun</code>, <code>12 soat</code>, <code>1 kun 6 soat</code>, <code>30 daqiqa</code>",
+        "Quyidagi birliklardan birini yoki bir nechtasini birga kiriting:\n"
+        "<b>yil, oy, kun, soat, daqiqa, soniya</b>\n\n"
+        "📌 Masalan:\n"
+        "<code>1 yil</code>\n"
+        "<code>3 oy</code>\n"
+        "<code>2 kun 5 soat</code>\n"
+        "<code>30 daqiqa</code>\n"
+        "<code>45 soniya</code>\n"
+        "<code>1 yil 2 oy 10 kun</code>",
         parse_mode="HTML",
         reply_markup=cancel_keyboard()
     )
@@ -1331,7 +1377,9 @@ async def receive_ad_duration(message: types.Message, state: FSMContext):
     seconds = parse_duration_to_seconds(message.text)
     if seconds is None:
         await message.answer(
-            "⚠️ Muddatni tushunmadim. Masalan: <code>2 kun</code>, <code>12 soat</code>, <code>1 kun 6 soat</code>",
+            "⚠️ Muddatni tushunmadim.\n\n"
+            "Quyidagi birliklardan foydalaning: <b>yil, oy, kun, soat, daqiqa, soniya</b>\n"
+            "Masalan: <code>1 yil</code>, <code>2 kun 5 soat</code>, <code>45 soniya</code>",
             parse_mode="HTML"
         )
         return
