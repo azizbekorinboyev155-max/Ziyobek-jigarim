@@ -258,7 +258,10 @@ async def is_subscribed(user_id):
     all_channels = CHANNELS + get_active_ad_channels()
     results = await asyncio.gather(*[is_subscribed_to(user_id, ch) for ch in all_channels])
     result = all(results)
-    SUBSCRIPTION_CACHE[user_id] = (result, time.time())
+    if result:
+        SUBSCRIPTION_CACHE[user_id] = (result, time.time())
+    else:
+        SUBSCRIPTION_CACHE.pop(user_id, None)  # obuna emasligini keshlamaymiz - doim qayta tekshiriladi
     return result
 
 
