@@ -119,6 +119,29 @@ for col_name, col_def in [
     except sqlite3.OperationalError:
         pass  # ustun allaqachon mavjud
 
+    cursor.execute('''
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+''')
+conn.commit()
+
+
+def get_setting(key, default=None):
+    cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+    row = cursor.fetchone()
+    return row[0] if row else default
+
+
+def set_setting(key, value):
+    cursor.execute('''
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    ''', (key, value))
+    conn.commit()
+
+
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS status_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,8 +259,14 @@ def get_next_free_movie_number():
 
 async def is_subscribed_to(user_id, channel_id):
     try:
-        member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+        member = await asyncio.wait_for(
+            bot.get_chat_member(chat_id=channel_id, user_id=user_id),
+            timeout=4
+        )
         return member.status in ['member', 'administrator', 'creator']
+    except asyncio.TimeoutError:
+        logging.warning(f"Obunani tekshirish {channel_id} uchun vaqt tugadi (timeout)")
+        return False
     except Exception as e:
         logging.warning(f"Obunani tekshirishda xato ({channel_id}): {e}")
         return False
@@ -265,7 +294,16 @@ async def is_subscribed(user_id):
     return result
 
 
+LAST_ACTIVE_UPDATE = {}  # user_id -> oxirgi yozilgan vaqt (soniya) - keraksiz bazaga yozishlarni kamaytirish uchun
+
+
 def ensure_user(user_id, referred_by=None, full_name=None, username=None):
+    now_ts = time.time()
+    last_update = LAST_ACTIVE_UPDATE.get(user_id)
+
+    if last_update and (now_ts - last_update < 60):
+        return False  # yaqinda yozilgan, bazaga qayta murojaat qilmaymiz
+
     now_str = time.strftime('%Y-%m-%d %H:%M:%S')
     cursor.execute('SELECT is_active FROM users WHERE user_id = ?', (user_id,))
     existing = cursor.fetchone()
@@ -286,6 +324,7 @@ def ensure_user(user_id, referred_by=None, full_name=None, username=None):
                 asyncio.create_task(notify_referrer(referred_by, points))
             except Exception:
                 pass
+        LAST_ACTIVE_UPDATE[user_id] = now_ts
         return True
 
     was_active = existing[0]
@@ -302,6 +341,7 @@ def ensure_user(user_id, referred_by=None, full_name=None, username=None):
         )
         conn.commit()
 
+    LAST_ACTIVE_UPDATE[user_id] = now_ts
     return False
 
 
@@ -721,7 +761,8 @@ async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, p
                     'INSERT INTO premiere_sends (premiere_id, user_id, message_id) VALUES (?, ?, ?)',
                     (premiere_id, uid, msg.message_id)
                 )
-                conn.commit()
+                if sent % 20 == 0:
+                    conn.commit()  # har safar emas, har 20 ta yozuvda bir marta saqlaymiz
         except Exception as e:
             failed += 1
             logging.warning(f"Premyera yuborishda xato ({uid}): {e}")
@@ -735,6 +776,7 @@ async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, p
             except Exception:
                 pass
         await asyncio.sleep(0.05)
+    conn.commit()  # oxirida qolgan yozuvlarni ham saqlab qo'yamiz
     return sent, failed
 
 
@@ -809,10 +851,19 @@ async def start(message: types.Message, command: CommandObject):
         )
         return
 
-    await message.answer(
-        "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling",
-        reply_markup=build_subscribe_keyboard()
-    )
+    welcome_photo_id = get_setting('welcome_photo_id')
+    welcome_text = get_setting('welcome_caption', '')
+    caption = f"{welcome_text}\n\n⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling" if welcome_text \
+        else "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling"
+
+    if welcome_photo_id:
+        await message.answer_photo(
+            photo=welcome_photo_id,
+            caption=caption,
+            reply_markup=build_subscribe_keyboard()
+        )
+    else:
+        await message.answer(caption, reply_markup=build_subscribe_keyboard())
 
 
 @dp.callback_query(F.data == "check_sub")
@@ -1681,6 +1732,30 @@ async def receive_ad_duration(message: types.Message, state: FSMContext):
         f"Bu havola shu muddat davomida yuboradigan barcha xabarlaringiz ostiga avtomatik qo'shiladi, "
         f"HAMDA /start tugmasidan keyingi obuna ro'yxatiga ham qo'shiladi.\n\n"
         f"{subscribe_note}"
+    )
+
+    # ---------- ADMIN: Banner (kirish rasmi) sozlash ----------
+# Admin botga rasm yuborib, caption'ni "banner:" so'zi bilan boshlasa,
+# shu rasm va matn /start bosgan HAR BIR yangi/obuna bo'lmagan foydalanuvchiga
+# avtomatik ko'rsatiladi. Qayta yuborilsa - eskisi almashtiriladi.
+@dp.message(F.photo)
+async def set_welcome_banner(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    caption = message.caption or ""
+    if not caption.lower().startswith("banner:"):
+        return  # oddiy rasm - e'tibor bermaymiz, boshqa hech narsa qilmaymiz
+
+    text = caption[len("banner:"):].strip()
+    file_id = message.photo[-1].file_id
+
+    set_setting('welcome_photo_id', file_id)
+    set_setting('welcome_caption', text)
+
+    await message.reply(
+        f"✅ Banner saqlandi! Endi /start bosgan barcha foydalanuvchilarga shu ko'rinadi:\n\n"
+        f"🖼 Rasm: qabul qilindi\n"
+        f"📝 Matn:\n{text}"
     )
 
 
