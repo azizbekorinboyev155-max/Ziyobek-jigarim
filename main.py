@@ -851,19 +851,10 @@ async def start(message: types.Message, command: CommandObject):
         )
         return
 
-    welcome_photo_id = get_setting('welcome_photo_id')
-    welcome_text = get_setting('welcome_caption', '')
-    caption = f"{welcome_text}\n\n⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling" if welcome_text \
-        else "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling"
-
-    if welcome_photo_id:
-        await message.answer_photo(
-            photo=welcome_photo_id,
-            caption=caption,
-            reply_markup=build_subscribe_keyboard()
-        )
-    else:
-        await message.answer(caption, reply_markup=build_subscribe_keyboard())
+    await message.answer(
+        "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling",
+        reply_markup=build_subscribe_keyboard()
+    )
 
 
 @dp.callback_query(F.data == "check_sub")
