@@ -451,21 +451,49 @@ def swap_movie(movie_id, direction):
     conn.commit()
 
 
-def admin_list_text_and_keyboard():
-    cursor.execute('SELECT id, name, code FROM movies ORDER BY order_num ASC, id ASC')
-    movies = cursor.fetchall()
-    if not movies:
+def admin_list_text_and_keyboard(page=0):
+    per_page = 10
+    offset = page * per_page
+
+    cursor.execute('SELECT COUNT(*) FROM movies')
+    total = cursor.fetchone()[0]
+    if total == 0:
         return "Bazada hali kino yo'q.", None
-    text = "🛠 Barcha kinolar — tartiblash (⬆️/⬇️), o'chirish (🗑):"
+    total_pages = (total - 1) // per_page
+
+    cursor.execute(
+        'SELECT id, name, code FROM movies ORDER BY order_num ASC, id ASC LIMIT ? OFFSET ?',
+        (per_page, offset)
+    )
+    movies = cursor.fetchall()
+
+    if not movies:
+        return "Bu sahifada kino yo'q.", InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⬅️ 1-sahifaga", callback_data="adm_page:0")
+        ]])
+
+    text = (
+        f"🛠 Barcha kinolar ({offset + 1}–{offset + len(movies)} / {total}) "
+        f"— tartiblash (⬆️/⬇️), o'chirish (🗑):"
+    )
     rows = []
-    for idx, (mid, name, code) in enumerate(movies, start=1):
+    for idx, (mid, name, code) in enumerate(movies, start=offset + 1):
         label = f"{idx}. {name}" + (f" [{code}]" if code else "")
         rows.append([
-            InlineKeyboardButton(text="⬆️", callback_data=f"adm_up:{mid}"),
+            InlineKeyboardButton(text="⬆️", callback_data=f"adm_up:{mid}:{page}"),
             InlineKeyboardButton(text=label, callback_data=f"show:{mid}"),
-            InlineKeyboardButton(text="⬇️", callback_data=f"adm_down:{mid}"),
-            InlineKeyboardButton(text="🗑", callback_data=f"adm_del:{mid}")
+            InlineKeyboardButton(text="⬇️", callback_data=f"adm_down:{mid}:{page}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"adm_del:{mid}:{page}")
         ])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"adm_page:{page - 1}"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"adm_page:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -691,8 +719,8 @@ def cancel_keyboard():
     ])
 
 
-async def open_admin_panel(chat_id):
-    text, kb = admin_list_text_and_keyboard()
+async def open_admin_panel(chat_id, page=0):
+    text, kb = admin_list_text_and_keyboard(page)
     await bot.send_message(chat_id, text, reply_markup=kb)
 
 
@@ -1015,14 +1043,26 @@ async def admin_panel(message: types.Message):
     await open_admin_panel(message.chat.id)
 
 
+@dp.callback_query(F.data.startswith("adm_page:"))
+async def adm_page_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    page = int(callback.data.split(":")[1])
+    text, kb = admin_list_text_and_keyboard(page)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("adm_up:"))
 async def adm_up_callback(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
-    movie_id = int(callback.data.split(":")[1])
+    _, movie_id, page = callback.data.split(":")
+    movie_id, page = int(movie_id), int(page)
     swap_movie(movie_id, direction=-1)
-    text, kb = admin_list_text_and_keyboard()
+    text, kb = admin_list_text_and_keyboard(page)
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer("⬆️ Ko'tarildi")
 
@@ -1032,9 +1072,10 @@ async def adm_down_callback(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
-    movie_id = int(callback.data.split(":")[1])
+    _, movie_id, page = callback.data.split(":")
+    movie_id, page = int(movie_id), int(page)
     swap_movie(movie_id, direction=1)
-    text, kb = admin_list_text_and_keyboard()
+    text, kb = admin_list_text_and_keyboard(page)
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer("⬇️ Tushirildi")
 
@@ -1044,7 +1085,8 @@ async def adm_del_callback(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
-    movie_id = int(callback.data.split(":")[1])
+    _, movie_id, page = callback.data.split(":")
+    movie_id, page = int(movie_id), int(page)
     cursor.execute('SELECT name FROM movies WHERE id = ?', (movie_id,))
     row = cursor.fetchone()
     if not row:
@@ -1054,8 +1096,8 @@ async def adm_del_callback(callback: types.CallbackQuery):
     await callback.message.edit_text(
         f"⚠️ '{name}' kinoni rostdan ham o'chirmoqchimisiz?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data=f"adm_del_yes:{movie_id}"),
-            InlineKeyboardButton(text="❌ Yo'q", callback_data="adm_del_no")
+            InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data=f"adm_del_yes:{movie_id}:{page}"),
+            InlineKeyboardButton(text="❌ Yo'q", callback_data=f"adm_del_no:{page}")
         ]])
     )
 
@@ -1065,7 +1107,8 @@ async def adm_del_yes_callback(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer("Ruxsat yo'q.", show_alert=True)
         return
-    movie_id = int(callback.data.split(":")[1])
+    _, movie_id, page = callback.data.split(":")
+    movie_id, page = int(movie_id), int(page)
 
     cursor.execute('DELETE FROM movies WHERE id = ?', (movie_id,))
     conn.commit()
@@ -1082,16 +1125,17 @@ async def adm_del_yes_callback(callback: types.CallbackQuery):
         cursor.execute("UPDATE counters SET value = ? WHERE key = 'movie_count'", (max(current - 1, 0),))
     conn.commit()
 
-    text, kb = admin_list_text_and_keyboard()
+    text, kb = admin_list_text_and_keyboard(page)
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer("🗑 O'chirildi, hisoblagich yangilandi")
 
 
-@dp.callback_query(F.data == "adm_del_no")
+@dp.callback_query(F.data.startswith("adm_del_no:"))
 async def adm_del_no_callback(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
-    text, kb = admin_list_text_and_keyboard()
+    page = int(callback.data.split(":")[1])
+    text, kb = admin_list_text_and_keyboard(page)
     await callback.message.edit_text(text, reply_markup=kb)
 
 
