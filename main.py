@@ -47,6 +47,7 @@ BROADCAST_BUTTON_TEXT = "✉️ Xabar qoldirish"
 STATS_BUTTON_TEXT = "📊 Statistika"
 MEMBERS_BUTTON_TEXT = "👥 Azolar"
 ACTIVE_SUBS_BUTTON_TEXT = "📡 Faol obunachilar"
+TK_BUTTON_TEXT = "📈 TK"
 LINK_BUTTON_TEXT = "🔗 Havola kiritish"
 LIST_BUTTON_TEXT = "📋 Ro'yxat"
 USER_CANCEL_BUTTON_TEXT = "🚫 Bekor qilish"
@@ -696,6 +697,7 @@ def admin_reply_keyboard():
             [KeyboardButton(text=ADMIN_BUTTON_TEXT), KeyboardButton(text=BROADCAST_BUTTON_TEXT)],
             [KeyboardButton(text=STATS_BUTTON_TEXT)],
             [KeyboardButton(text=MEMBERS_BUTTON_TEXT), KeyboardButton(text=ACTIVE_SUBS_BUTTON_TEXT)],
+            [KeyboardButton(text=TK_BUTTON_TEXT)],
             [KeyboardButton(text=LINK_BUTTON_TEXT), KeyboardButton(text=LIST_BUTTON_TEXT)],
             [KeyboardButton(text=USER_CANCEL_BUTTON_TEXT)]
         ],
@@ -1396,6 +1398,42 @@ async def members_page_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
+def build_top_views_keyboard(page=0):
+    per_page = 10
+    offset = page * per_page
+
+    cursor.execute('SELECT COUNT(*) FROM movies')
+    total = cursor.fetchone()[0]
+    if total == 0:
+        return "📈 Bazada hali kino yo'q.", None
+    total_pages = (total - 1) // per_page
+
+    cursor.execute('''
+        SELECT name, code, search_count FROM movies
+        ORDER BY search_count DESC, id ASC
+        LIMIT ? OFFSET ?
+    ''', (per_page, offset))
+    rows = cursor.fetchall()
+
+    if not rows:
+        return "Bu sahifada kino yo'q.", InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⬅️ 1-sahifaga", callback_data="topviews_page:0")
+        ]])
+
+    text = f"📈 Ko'rishlar reytingi ({offset + 1}–{offset + len(rows)} / {total}):\n\n"
+    for idx, (name, code, count) in enumerate(rows, start=offset + 1):
+        code_part = f" [{code}]" if code else ""
+        text += f"{idx}. {name}{code_part} — {count} marta ko'rilgan\n"
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"topviews_page:{page - 1}"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"topviews_page:{page + 1}"))
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[nav]) if nav else None
+    return text, keyboard
+
+
 def build_active_subs_text():
     cursor.execute('''
         SELECT users.user_id, users.full_name, users.username, users.is_active,
@@ -1431,7 +1469,28 @@ async def active_subs_button_handler(message: types.Message):
     await message.answer(build_active_subs_text())
 
 
+@dp.message(F.text == TK_BUTTON_TEXT)
+async def tk_button_handler(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text, kb = build_top_views_keyboard()
+    await message.answer(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("topviews_page:"))
+async def topviews_page_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    page = int(callback.data.split(":")[1])
+    text, kb = build_top_views_keyboard(page)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
 @dp.message(F.text == BROADCAST_BUTTON_TEXT)
+async def broadcast_button_handler(message: types.Message, state: FSMContext):
+    ...
 async def broadcast_button_handler(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
