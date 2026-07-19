@@ -786,6 +786,7 @@ async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, p
     premiere_sends jadvaliga yoziladi - shu orqali keyinchalik premyerani HAMMA
     foydalanuvchidan o'chirish (delete_message) imkoniyati paydo bo'ladi."""
     sent, failed = 0, 0
+    failed_details = []  # YANGI: kimga va nega yuborilmagani
     kb = InlineKeyboardMarkup(inline_keyboard=[channel_button_row()] + ads_keyboard_rows())
     user_ids = await get_all_user_ids()
     total = len(user_ids)
@@ -802,8 +803,9 @@ async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, p
                     conn.commit()  # har safar emas, har 20 ta yozuvda bir marta saqlaymiz
         except Exception as e:
             failed += 1
+            failed_details.append((uid, str(e)))  # YANGI
             logging.warning(f"Premyera yuborishda xato ({uid}): {e}")
-        if progress_chat_id and (sent + failed) % 50 == 0:
+        if progress_chat_id and (sent + failed) % max(5, total // 10 or 1) == 0:
             try:
                 await bot.edit_message_text(
                     f"📤 Yuborilmoqda... {sent + failed}/{total}",
@@ -814,7 +816,7 @@ async def broadcast_video_to_all(file_id, caption_text, progress_chat_id=None, p
                 pass
         await asyncio.sleep(0.05)
     conn.commit()  # oxirida qolgan yozuvlarni ham saqlab qo'yamiz
-    return sent, failed
+    return sent, failed, failed_details  # YANGI: uchinchi qiymat qo'shildi
 
 
 async def broadcast_content_to_all(content, extra_caption=None, progress_chat_id=None, progress_message_id=None):
@@ -887,6 +889,21 @@ async def start(message: types.Message, command: CommandObject):
             reply_markup=admin_reply_keyboard()
         )
         return
+
+    welcome_photo_id = get_setting('welcome_photo_id')
+    welcome_caption = get_setting('welcome_caption')
+
+    if welcome_photo_id:
+        caption_text = welcome_caption or "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling"
+        try:
+            await message.answer_photo(
+                welcome_photo_id,
+                caption=caption_text,
+                reply_markup=build_subscribe_keyboard()
+            )
+            return
+        except Exception as e:
+            logging.warning(f"Banner rasmini yuborishda xato: {e}")
 
     await message.answer(
         "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling",
@@ -1686,16 +1703,23 @@ async def receive_premiere_caption(message: types.Message, state: FSMContext):
     premiere_id = cursor.lastrowid
 
     status_msg = await message.answer("📤 Premyera barchaga yuborilmoqda, biroz kuting...")
-    sent, failed = await broadcast_video_to_all(
+    sent, failed, failed_details = await broadcast_video_to_all(
         file_id, full_caption,
         progress_chat_id=status_msg.chat.id,
         progress_message_id=status_msg.message_id,
         premiere_id=premiere_id
     )
 
+    fail_text = ""
+    if failed_details:
+        fail_lines = "\n".join(f"• ID {uid}: {err[:60]}" for uid, err in failed_details[:10])
+        fail_text = f"\n\n⚠️ Xatolik tafsilotlari:\n{fail_lines}"
+
     await message.answer(
         f"✅ Premyera barcha foydalanuvchilarga yuborildi.\n"
-        f"{sent} foydalanuvchiga yuborildi.\n⚠️ {failed} ta xatolik.\n\n"
+        f"{sent} foydalanuvchiga yuborildi.\n⚠️ {failed} ta xatolik.\n"
+        f"👥 Jami tekshirilgan: {sent + failed} ta foydalanuvchi\n"
+        f"{fail_text}\n\n"
         f"ℹ️ Bu premyerani keyin ham 🎬 Premyera → 🗑 Premyeralarni tahrirlash orqali o'chirishingiz mumkin."
     )
 
