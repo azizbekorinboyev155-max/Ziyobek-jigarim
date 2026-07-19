@@ -120,7 +120,7 @@ for col_name, col_def in [
     except sqlite3.OperationalError:
         pass  # ustun allaqachon mavjud
 
-    cursor.execute('''
+cursor.execute('''
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -693,12 +693,19 @@ def build_subscribe_keyboard():
 def admin_reply_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=PREMIERE_BUTTON_TEXT)],
-            [KeyboardButton(text=ADMIN_BUTTON_TEXT), KeyboardButton(text=BROADCAST_BUTTON_TEXT)],
-            [KeyboardButton(text=STATS_BUTTON_TEXT)],
-            [KeyboardButton(text=MEMBERS_BUTTON_TEXT), KeyboardButton(text=ACTIVE_SUBS_BUTTON_TEXT)],
-            [KeyboardButton(text=TK_BUTTON_TEXT)],
-            [KeyboardButton(text=LINK_BUTTON_TEXT), KeyboardButton(text=LIST_BUTTON_TEXT)],
+            [
+                KeyboardButton(text=PREMIERE_BUTTON_TEXT),
+                KeyboardButton(text=ADMIN_BUTTON_TEXT),
+                KeyboardButton(text=BROADCAST_BUTTON_TEXT)
+            ],
+            [
+                KeyboardButton(text=STATS_BUTTON_TEXT),
+                KeyboardButton(text=MEMBERS_BUTTON_TEXT),
+                KeyboardButton(text=ACTIVE_SUBS_BUTTON_TEXT),
+                KeyboardButton(text=TK_BUTTON_TEXT),
+                KeyboardButton(text=LINK_BUTTON_TEXT),
+                KeyboardButton(text=LIST_BUTTON_TEXT)
+            ],
             [KeyboardButton(text=USER_CANCEL_BUTTON_TEXT)]
         ],
         resize_keyboard=True,
@@ -1491,8 +1498,6 @@ async def topviews_page_callback(callback: types.CallbackQuery):
 
 
 @dp.message(F.text == BROADCAST_BUTTON_TEXT)
-async def broadcast_button_handler(message: types.Message, state: FSMContext):
-    ...
 async def broadcast_button_handler(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
         return
