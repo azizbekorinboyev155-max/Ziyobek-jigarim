@@ -890,21 +890,6 @@ async def start(message: types.Message, command: CommandObject):
         )
         return
 
-    welcome_photo_id = get_setting('welcome_photo_id')
-    welcome_caption = get_setting('welcome_caption')
-
-    if welcome_photo_id:
-        caption_text = welcome_caption or "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling"
-        try:
-            await message.answer_photo(
-                welcome_photo_id,
-                caption=caption_text,
-                reply_markup=build_subscribe_keyboard()
-            )
-            return
-        except Exception as e:
-            logging.warning(f"Banner rasmini yuborishda xato: {e}")
-
     await message.answer(
         "⚠️ Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling",
         reply_markup=build_subscribe_keyboard()
