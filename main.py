@@ -1034,8 +1034,10 @@ async def rate_callback(callback: types.CallbackQuery):
 async def adm_cancel_callback(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         return
+    current_state = await state.get_state()
     await state.clear()
-    await callback.message.edit_text("❌ Bekor qilindi.")
+    text = CANCEL_MESSAGES.get(current_state, "❌ Bekor qilindi.")
+    await callback.message.edit_text(text)
 
 
 @dp.message(Command("admin"))
@@ -1583,16 +1585,50 @@ async def ad_del_no_callback(callback: types.CallbackQuery):
 # MUHIM: bu handlerlar pastdagi barcha FSM (holat) handlerlaridan OLDIN turishi shart,
 # aks holda /cancel matni o'sha holat handleri tomonidan "yutib yuborilishi" mumkin.
 
+CANCEL_MESSAGES = {
+    AdminStates.waiting_premiere_video.state: "❌ Premyera video yuklash bekor qilindi.",
+    AdminStates.waiting_premiere_caption.state: "❌ Premyera nomi/tavsifini kiritish bekor qilindi. Video saqlanmadi.",
+    AdminStates.waiting_broadcast_message.state: "❌ Xabar qoldirish bekor qilindi.",
+    AdminStates.waiting_broadcast_confirm.state: "❌ Xabar qoldirish bekor qilindi.",
+    AdminStates.waiting_broadcast_izoh.state: "❌ Izoh kiritish bekor qilindi, xabar yuborilmadi.",
+    AdminStates.waiting_slot_video.state: "❌ Bo'sh raqamga video yuklash bekor qilindi.",
+    AdminStates.waiting_ad_link.state: "❌ Havola kiritish bekor qilindi.",
+    AdminStates.waiting_ad_duration.state: "❌ Havola muddatini kiritish bekor qilindi. Havola saqlanmadi.",
+}
+
+
+async def cancel_current_action(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    await state.clear()
+
+    if current_state is None:
+        await message.answer("ℹ️ Bekor qiladigan hech qanday jarayon yo'q edi.")
+        return
+
+    text = CANCEL_MESSAGES.get(current_state, "❌ Bekor qilindi.")
+
+    # Premyera jarayoni bekor qilinsa - premyera menyusiga qaytaramiz
+    if current_state in (AdminStates.waiting_premiere_video.state, AdminStates.waiting_premiere_caption.state):
+        await message.answer(text, reply_markup=premiere_menu_keyboard())
+        return
+
+    # Bo'sh raqamga video yuklash bekor qilinsa - kinolar ro'yxatiga qaytaramiz
+    if current_state == AdminStates.waiting_slot_video.state:
+        await message.answer(text)
+        await open_admin_panel(message.chat.id)
+        return
+
+    await message.answer(text)
+
+
 @dp.message(Command("cancel"))
 async def cancel_command(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Bekor qilindi.")
+    await cancel_current_action(message, state)
 
 
 @dp.message(F.text == USER_CANCEL_BUTTON_TEXT)
 async def cancel_button_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("❌ Bekor qilindi.")
+    await cancel_current_action(message, state)
 
 
 # ---------- ADMIN: Premyera oqimi (video -> "Nomi | Tavsif" -> barchaga avtomatik yuborish) ----------
